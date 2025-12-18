@@ -1,8 +1,24 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Job } from '../../lib/types';
-import { MapPin, DollarSign, Briefcase, Building2 } from 'lucide-react';
+import { MapPin, DollarSign, Building2, CheckCircle2, Loader2 } from 'lucide-react';
+import { cn } from '../../lib/utils';
 
-export const JobCard = ({ job }: { job: Job }) => {
+interface JobCardProps {
+    job: Job;
+    isApplied?: boolean;
+    onApply?: () => void;
+}
+
+export const JobCard = ({ job, isApplied = false, onApply }: JobCardProps) => {
+  const [loading, setLoading] = useState(false);
+
+  const handleApplyClick = async () => {
+    if (isApplied || !onApply) return;
+    setLoading(true);
+    await onApply();
+    setLoading(false);
+  };
+
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden max-w-[300px] my-2">
       <div className="bg-gray-50 p-3 border-b border-gray-100 flex justify-between items-start">
@@ -36,8 +52,27 @@ export const JobCard = ({ job }: { job: Job }) => {
         <button className="text-sm font-medium text-gray-600 py-2 hover:bg-gray-50 rounded transition-colors">
             More Info
         </button>
-        <button className="text-sm font-medium text-green-600 bg-green-50 py-2 hover:bg-green-100 rounded transition-colors">
-            Apply Now
+        
+        <button 
+            onClick={handleApplyClick}
+            disabled={isApplied || loading}
+            className={cn(
+                "text-sm font-medium py-2 rounded transition-colors flex items-center justify-center gap-1",
+                isApplied 
+                    ? "bg-green-100 text-green-700 cursor-default" 
+                    : "bg-green-50 text-green-600 hover:bg-green-100"
+            )}
+        >
+            {loading ? (
+                <Loader2 size={14} className="animate-spin" />
+            ) : isApplied ? (
+                <>
+                    <CheckCircle2 size={14} />
+                    Applied
+                </>
+            ) : (
+                "Apply Now"
+            )}
         </button>
       </div>
     </div>

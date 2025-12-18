@@ -2,81 +2,75 @@ import { UserProfile, Message } from './types';
 import * as api from './api';
 import { getOpenAIClient, generateEmbedding } from './openai';
 
-/**
- * THE "BRAIN" of the system.
- * Uses OpenAI GPT-4o if API Key is present, otherwise falls back to Regex.
- */
+// --- CONFIGURATION ---
+const AI_MODEL = "google/gemini-2.0-flash-001";
 
-// System Prompts
 const SUPERVISOR_PROMPT = `
 You are the Supervisor Agent for a WhatsApp Job Assistant.
-Your goal is to classify the user's intent into one of these categories:
-1. ONBOARDING: User is providing name, city, or basic info to create a profile.
-2. UPDATE_PROFILE: User explicitly wants to change existing info (e.g., "Change city to Delhi").
-3. JOB_SEARCH: User is asking for jobs, vacancies, or work.
-4. GENERAL_QA: General questions, greetings, or unclear inputs.
+Classify the user's intent:
 
-Return ONLY a JSON object: { "intent": "..." }
+1. ONBOARDING: User is providing name, city, skills, or answering the "City Search" preference question (Yes/No).
+2. UPDATE_PROFILE: User explicitly wants to change info.
+3. JOB_SEARCH: User is explicitly asking to FIND jobs.
+4. GENERAL_QA: User is asking a QUESTION (How to, What is, Salary, Advice).
+
+Return JSON: { "intent": "..." }
 `;
 
 const PROFILE_EXTRACTOR_PROMPT = `
-You are a Profile Extraction Agent.
-Extract the following fields from the user's text if present:
-- name (string)
-- city (string)
-- skills (array of strings)
-- expected_salary (string/number)
-
-Return a JSON object with extracted fields. If a field is not found, do not include it.
-Example Input: "My name is Rahul, I drive a truck in Mumbai, expecting 20k"
-Example Output: { "name": "Rahul", "city": "Mumbai", "skills": ["Truck Driver"], "expected_salary": "20000" }
+Extract fields: name, city, skills (array), expected_salary.
+Return JSON object.
 `;
 
-// --- AI LOGIC ---
+const GENERAL_QA_PROMPT = `
+You are an expert Career Counselor for blue-collar workers in India.
+Provide a **REAL, ACCURATE, and DETAILED** answer. 
+- Do NOT use dummy text. 
+- Use realistic salary ranges for India (e.g. ₹15k-25k).
+- Give step-by-step advice for interviews or documents.
+- Be helpful and encouraging.
+`;
 
-const determineIntentWithAI = async (text: string, client: any): Promise<string> => {
+// --- LOCAL KNOWLEDGE BASE ---
+const getLocalKnowledgeAnswer = (text: string): string | null => {
+    const lower = text.toLowerCase();
+    if (lower.includes('salary')) {
+        return "💰 **Estimated Salaries (India):**\n• Driver: ₹18,000 - ₹25,000\n• Delivery: ₹15,000 - ₹30,000\n• Security: ₹15,000 - ₹20,000\n• Office Boy: ₹12,000 - ₹18,000";
+    }
+    return null;
+};
+
+// --- AI LOGIC ---
+const determineIntentWithAI = async (text: string, client: any): Promise<string | null> => {
   try {
     const completion = await client.chat.completions.create({
-      messages: [
-        { role: "system", content: SUPERVISOR_PROMPT },
-        { role: "user", content: text }
-      ],
-      model: "gpt-4o",
+      messages: [{ role: "system", content: SUPERVISOR_PROMPT }, { role: "user", content: text }],
+      model: AI_MODEL,
       response_format: { type: "json_object" }
     });
     const result = JSON.parse(completion.choices[0].message.content);
     return result.intent || 'GENERAL_QA';
-  } catch (e) {
-    console.error("AI Intent Error:", e);
-    return 'GENERAL_QA';
-  }
+  } catch (e) { return null; }
 };
 
 const extractProfileWithAI = async (text: string, client: any) => {
   try {
     const completion = await client.chat.completions.create({
-      messages: [
-        { role: "system", content: PROFILE_EXTRACTOR_PROMPT },
-        { role: "user", content: text }
-      ],
-      model: "gpt-4o",
+      messages: [{ role: "system", content: PROFILE_EXTRACTOR_PROMPT }, { role: "user", content: text }],
+      model: AI_MODEL,
       response_format: { type: "json_object" }
     });
     return JSON.parse(completion.choices[0].message.content);
-  } catch (e) {
-    console.error("AI Extraction Error:", e);
-    return {};
-  }
+  } catch (e) { return null; }
 };
 
 // --- MAIN PROCESSOR ---
 
 export const processUserMessage = async (phone: string, text: string, apiKey?: string): Promise<Message[]> => {
   const client = getOpenAIClient(apiKey);
-  
-  // 1. Identify User
   let profile = await api.getSeekerByPhone(phone);
   
+  // 1. New User
   if (!profile) {
     profile = await api.createSeeker(phone);
     if (!profile) return [{ id: 'err', sender: 'bot', type: 'text', content: 'System Error', timestamp: new Date() }];
@@ -85,97 +79,136 @@ export const processUserMessage = async (phone: string, text: string, apiKey?: s
       id: Math.random().toString(),
       sender: 'bot',
       type: 'text',
-      content: "👋 Welcome to JobAssistant! Let's create your profile. What is your full name?",
+      content: "👋 Welcome to JobAssistant! Let's create your profile.\n\nWhat is your full name?",
       timestamp: new Date()
     };
     await api.saveMessage({ profile_id: profile.id, sender: 'bot', type: 'text', content: welcomeMsg.content });
     return [welcomeMsg];
   }
 
-  // 2. Save User Message
   await api.saveMessage({ profile_id: profile.id, sender: 'user', type: 'text', content: text });
 
-  // 3. Determine Intent (AI or Regex)
-  let intent = 'GENERAL_QA';
-  if (client) {
-    intent = await determineIntentWithAI(text, client);
+  // 2. Determine Intent
+  let intent: string | null = null;
+  
+  // SPECIAL CHECK: If we are waiting for Search Preference (Yes/No)
+  if (profile.name && profile.city && profile.skills && profile.skills.length > 0 && !profile.search_mode) {
+      const lower = text.toLowerCase();
+      if (lower === 'yes' || lower.includes('yes')) {
+          // User wants Local Search
+          await api.updateSeeker(profile.id, { search_mode: 'local' });
+          profile.search_mode = 'local';
+          intent = 'JOB_SEARCH';
+      } else if (lower === 'no' || lower.includes('no')) {
+          // User wants Global Search
+          await api.updateSeeker(profile.id, { search_mode: 'global' });
+          profile.search_mode = 'global';
+          intent = 'JOB_SEARCH';
+      } else {
+          // Ambiguous response, treat as Onboarding to re-ask
+          intent = 'ONBOARDING';
+      }
   } else {
-    // Fallback Regex Logic
-    const lower = text.toLowerCase();
-    if (lower.includes('update')) intent = 'UPDATE_PROFILE';
-    else if (lower.includes('job') || lower.includes('work') || lower.includes('find')) intent = 'JOB_SEARCH';
-    else if (!profile.name || !profile.city || !profile.skills || profile.skills.length === 0) intent = 'ONBOARDING';
+      if (client) intent = await determineIntentWithAI(text, client);
+      if (!intent) {
+        // Fallback
+        const lower = text.toLowerCase();
+        if (lower.includes('job') || lower.includes('find')) intent = 'JOB_SEARCH';
+        else if (!profile.name || !profile.city || !profile.skills?.length) intent = 'ONBOARDING';
+        else intent = 'GENERAL_QA';
+      }
   }
 
-  console.log("Determined Intent:", intent);
-
+  console.log("Intent:", intent);
   const responses: Message[] = [];
 
-  // 4. Handle Intent
+  // 3. Handle Intent
   if (intent === 'ONBOARDING' || intent === 'UPDATE_PROFILE') {
     let updates: any = {};
+    if (client) updates = await extractProfileWithAI(text, client) || {};
     
-    if (client) {
-      updates = await extractProfileWithAI(text, client);
-    } else {
-      // Basic regex fallback
-      if (!profile.name) updates.name = text;
-      else if (!profile.city) updates.city = text;
-      else if (!profile.skills?.length) updates.skills = [text];
+    // Fallback extraction
+    if (Object.keys(updates).length === 0) {
+       if (!profile.name) updates.name = text;
+       else if (!profile.city) updates.city = text;
+       else if (!profile.skills?.length) updates.skills = [text];
     }
 
-    // Apply updates
+    // If user is updating profile, reset search mode to ask again
+    if (intent === 'UPDATE_PROFILE') {
+        updates.search_mode = null;
+    }
+
     if (Object.keys(updates).length > 0) {
       await api.updateSeeker(profile.id, updates);
-      
-      // Refresh profile for context
       profile = { ...profile, ...updates };
       
       responses.push({
         id: Math.random().toString(),
         sender: 'bot',
         type: 'text',
-        content: `✅ Updated: ${Object.keys(updates).join(', ')}. \n\nCurrent Profile:\nName: ${profile.name || '-'}\nCity: ${profile.city || '-'}\nSkills: ${profile.skills?.join(', ') || '-'}`,
-        timestamp: new Date()
-      });
-
-      if (profile.name && profile.city && profile.skills?.length) {
-        responses.push({
-          id: Math.random().toString(),
-          sender: 'bot',
-          type: 'text',
-          content: "Your profile is ready! Type 'Find Jobs' to see matches.",
-          timestamp: new Date()
-        });
-      }
-    } else {
-      responses.push({
-        id: Math.random().toString(),
-        sender: 'bot',
-        type: 'text',
-        content: "Could you please provide more details? (Name, City, or Skills)",
+        content: `✅ Saved: ${Object.keys(updates).join(', ')}`,
         timestamp: new Date()
       });
     }
+
+    // FLOW CONTROL
+    if (!profile.name) {
+        responses.push({ id: Math.random().toString(), sender: 'bot', type: 'text', content: "What is your full name?", timestamp: new Date() });
+    } else if (!profile.city) {
+        responses.push({ id: Math.random().toString(), sender: 'bot', type: 'text', content: `Hi ${profile.name}, which city do you live in?`, timestamp: new Date() });
+    } else if (!profile.skills || profile.skills.length === 0) {
+        responses.push({ id: Math.random().toString(), sender: 'bot', type: 'text', content: `Got it, ${profile.city}. What job are you looking for? (e.g. Driver, Electrician)`, timestamp: new Date() });
+    } else if (!profile.search_mode) {
+        // NEW STEP: Ask for City Preference
+        responses.push({ 
+            id: Math.random().toString(), 
+            sender: 'bot', 
+            type: 'text', 
+            content: `Are you searching for a job based on your city (${profile.city})?\n\nTap an option:`, 
+            timestamp: new Date(),
+            options: ['Yes', 'No'] // UI will render buttons
+        });
+    } else {
+        responses.push({ id: Math.random().toString(), sender: 'bot', type: 'text', content: "Profile ready! Type 'Find Jobs' to start.", timestamp: new Date() });
+    }
   } 
   else if (intent === 'JOB_SEARCH') {
+    // Determine Search Scope
+    let searchCity = profile.city;
+    
+    // If user explicitly said "No" to city filter, or if they are asking for a specific skill in this message that overrides context
+    if (profile.search_mode === 'global') {
+        searchCity = null; // Remove city filter
+    }
+
+    // Check if user provided specific skills in this message (overriding profile skills)
+    let searchSkills = profile.skills;
+    if (client) {
+        const extraction = await extractProfileWithAI(text, client);
+        if (extraction?.skills?.length) {
+            searchSkills = extraction.skills;
+            // If searching specific skill, maybe ignore city? 
+            // Let's stick to the user's preference unless they say "in Mumbai" explicitly.
+            if (extraction.city) searchCity = extraction.city;
+        }
+    }
+
+    const modeText = searchCity ? `in ${searchCity}` : "(All India)";
     responses.push({
       id: Math.random().toString(),
       sender: 'bot',
       type: 'text',
-      content: `🔍 Searching for jobs matching your profile...`,
+      content: `🔍 Searching for ${searchSkills?.join(', ')} jobs ${modeText}...`,
       timestamp: new Date()
     });
 
-    let jobs = [];
-    if (client && profile.skills && profile.skills.length > 0) {
-      // Generate embedding for the user's skills + city
-      const queryText = `${profile.skills.join(' ')} ${profile.city || ''} ${profile.preferred_job_type || ''}`;
-      const embedding = await generateEmbedding(queryText, client);
-      jobs = await api.getJobs({}, embedding);
-    } else {
-      jobs = await api.getJobs({ city: profile.city, skills: profile.skills });
-    }
+    // Generate Embedding
+    const queryText = `${searchSkills?.join(' ')} ${searchCity || ''}`;
+    let embedding = undefined;
+    if (client) embedding = await generateEmbedding(queryText, client);
+
+    const jobs = await api.getJobs({ city: searchCity, skills: searchSkills }, embedding);
 
     if (jobs.length > 0) {
       jobs.forEach(job => {
@@ -193,30 +226,38 @@ export const processUserMessage = async (phone: string, text: string, apiKey?: s
         id: Math.random().toString(),
         sender: 'bot',
         type: 'text',
-        content: "No matching jobs found yet. Try updating your city or skills!",
+        content: `No jobs found ${modeText}. Try updating your profile or search for "Anywhere".`,
         timestamp: new Date()
       });
     }
   } 
   else {
-    // GENERAL QA
-    responses.push({
-      id: Math.random().toString(),
-      sender: 'bot',
-      type: 'text',
-      content: "I am your Job Assistant. You can ask me to 'Find Jobs' or 'Update my Profile'.",
-      timestamp: new Date()
-    });
+    // GENERAL QA (Real Answers)
+    let answer = null;
+    if (client) {
+        try {
+            const completion = await client.chat.completions.create({
+                messages: [{ role: "system", content: GENERAL_QA_PROMPT }, { role: "user", content: text }],
+                model: AI_MODEL,
+            });
+            answer = completion.choices[0].message.content;
+        } catch (e) {}
+    }
+    if (!answer) answer = getLocalKnowledgeAnswer(text);
+    if (!answer) answer = "I can help you Find Jobs or Answer Questions. Try asking 'What is driver salary?'";
+
+    responses.push({ id: Math.random().toString(), sender: 'bot', type: 'text', content: answer, timestamp: new Date() });
   }
 
-  // 5. Save Responses
+  // Save Bot Responses
   for (const resp of responses) {
     await api.saveMessage({ 
       profile_id: profile.id, 
       sender: 'bot', 
       type: resp.type, 
       content: resp.content,
-      job_data: resp.jobData 
+      job_data: resp.jobData,
+      options: resp.options
     });
   }
 

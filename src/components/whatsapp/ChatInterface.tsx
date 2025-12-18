@@ -1,13 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Mic, Paperclip, MoreVertical, Smile, Loader2, StopCircle, Settings, Trash2, RefreshCw } from 'lucide-react';
+import { Send, Mic, Paperclip, MoreVertical, Smile, Loader2, StopCircle, Settings, RefreshCw, Trash2 } from 'lucide-react';
 import { Message } from '../../lib/types';
 import { processUserMessage } from '../../lib/agents';
-import { getMessageHistory, getSeekerByPhone, clearChatHistory } from '../../lib/api';
+import { getMessageHistory, getSeekerByPhone, clearChatHistory, applyForJob, getAppliedJobIds, clearAllData, saveMessage, resetUserSessionData } from '../../lib/api';
 import { JobCard } from './JobCard';
 import { cn } from '../../lib/utils';
 
 export const ChatInterface = () => {
-  // 1. Dynamic Phone Number for "Guaranteed Reset"
   const [demoPhone, setDemoPhone] = useState(() => {
     return localStorage.getItem('job_assistant_demo_phone') || '+919876543210';
   });
@@ -19,9 +18,10 @@ export const ChatInterface = () => {
   const [isListening, setIsListening] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+  const [connectionError, setConnectionError] = useState(false);
   
-  // Auto-detect key from env
-  const [apiKey, setApiKey] = useState(import.meta.env.VITE_OPENAI_API_KEY || '');
+  const [currentProfileId, setCurrentProfileId] = useState<string | null>(null);
+  const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
@@ -30,7 +30,6 @@ export const ChatInterface = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  // Initialize Speech Recognition
   useEffect(() => {
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -49,7 +48,7 @@ export const ChatInterface = () => {
             setIsListening(false);
         };
     }
-  }, [apiKey]);
+  }, []);
 
   const toggleListening = () => {
     if (isListening) {
@@ -62,27 +61,44 @@ export const ChatInterface = () => {
 
   const loadHistory = async () => {
     setIsLoadingHistory(true);
-    // Use the dynamic demoPhone
-    const profile = await getSeekerByPhone(demoPhone);
-    if (profile) {
-      const history = await getMessageHistory(profile.id);
-      setMessages(history);
-    } else {
-      setMessages([{
-          id: 'welcome',
-          sender: 'bot',
-          type: 'text',
-          content: 'Hello! Type "Hi" to start.',
-          timestamp: new Date()
-      }]);
+    setConnectionError(false);
+    try {
+        const profile = await getSeekerByPhone(demoPhone);
+        if (profile) {
+          setCurrentProfileId(profile.id);
+          const [history, appIds] = await Promise.all([
+            getMessageHistory(profile.id),
+            getAppliedJobIds(profile.id)
+          ]);
+          setMessages(history);
+          setAppliedJobIds(new Set(appIds));
+        } else {
+          setMessages([{
+              id: 'welcome',
+              sender: 'bot',
+              type: 'text',
+              content: 'Hello! Type "Hi" to start.',
+              timestamp: new Date()
+          }]);
+        }
+    } catch (error) {
+        console.error("Failed to load history:", error);
+        setConnectionError(true);
+        setMessages([{
+            id: 'error',
+            sender: 'bot',
+            type: 'text',
+            content: '⚠️ Connection Error: Unable to reach the database.',
+            timestamp: new Date()
+        }]);
+    } finally {
+        setIsLoadingHistory(false);
     }
-    setIsLoadingHistory(false);
   };
 
-  // Load History on Mount
   useEffect(() => {
     loadHistory();
-  }, [demoPhone]); // Reload if phone changes
+  }, [demoPhone]);
 
   useEffect(() => {
     scrollToBottom();
@@ -106,39 +122,87 @@ export const ChatInterface = () => {
     setIsTyping(true);
 
     try {
-        // Pass API Key to Agents
-        const responses = await processUserMessage(demoPhone, userMsg.content, apiKey);
+        const responses = await processUserMessage(demoPhone, userMsg.content);
         setMessages(prev => [...prev, ...responses]);
+        
+        if (!currentProfileId) {
+            const profile = await getSeekerByPhone(demoPhone);
+            if (profile) setCurrentProfileId(profile.id);
+        }
     } catch (error) {
         console.error(error);
+        setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            sender: 'bot',
+            type: 'text',
+            content: "⚠️ Sorry, I'm having trouble connecting right now.",
+            timestamp: new Date()
+        }]);
     } finally {
         setIsTyping(false);
     }
   };
 
-  const handleReset = async () => {
-    if(!confirm("Are you sure? This will clear your chat history and start a fresh demo session.")) return;
-    
-    setIsResetting(true);
-    try {
-        // 1. Try to clean up DB (Best effort)
-        const profile = await getSeekerByPhone(demoPhone);
-        if(profile) {
-            await clearChatHistory(profile.id);
-        }
-    } catch (error) {
-        console.warn("DB Cleanup failed (likely permissions), switching user identity instead.", error);
-    } finally {
-        // 2. GUARANTEED RESET: Switch Identity
-        // Generate a new random phone number so the system treats you as a new user
-        const newPhone = '+91' + Math.floor(Math.random() * 9000000000 + 1000000000).toString();
-        localStorage.setItem('job_assistant_demo_phone', newPhone);
-        setDemoPhone(newPhone);
-        
-        setIsResetting(false);
-        setShowSettings(false);
-        // No need to reload page, state update triggers re-render
+  const handleJobApply = async (jobId: string) => {
+    if (!currentProfileId) {
+        alert("Please complete your profile setup first!");
+        return;
     }
+    const jobMessage = messages.find(m => m.jobData?.id === jobId);
+    const jobTitle = jobMessage?.jobData?.title || "this job";
+
+    setAppliedJobIds(prev => new Set(prev).add(jobId));
+
+    const result = await applyForJob(jobId, currentProfileId);
+    
+    if (result.success) {
+        const confirmationMsg: Message = {
+            id: Date.now().toString(),
+            sender: 'bot',
+            type: 'text',
+            content: `✅ Application Submitted! \n\nWe have received your application for *${jobTitle}*. Our team will review your profile and contact you shortly.`,
+            timestamp: new Date()
+        };
+        setMessages(prev => [...prev, confirmationMsg]);
+        await saveMessage({
+            profile_id: currentProfileId,
+            sender: 'bot',
+            type: 'text',
+            content: confirmationMsg.content
+        });
+    } else {
+        setAppliedJobIds(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(jobId);
+            return newSet;
+        });
+        if (result.error === 'JOB_NOT_FOUND') {
+            alert("⚠️ This job is no longer available (Expired).");
+        } else {
+            alert("Failed to apply. Please try again.");
+        }
+    }
+  };
+
+  const handleReset = async () => {
+    if(!confirm("Start a fresh demo session?")) return;
+    setIsResetting(true);
+    const newPhone = '+91' + Math.floor(Math.random() * 9000000000 + 1000000000).toString();
+    localStorage.setItem('job_assistant_demo_phone', newPhone);
+    setDemoPhone(newPhone);
+    setCurrentProfileId(null);
+    setAppliedJobIds(new Set());
+    setIsResetting(false);
+    setShowSettings(false);
+  };
+
+  // UPDATED: Only resets user data, keeps jobs
+  const handleFullDatabaseReset = async () => {
+      if(!confirm("⚠️ This will delete ALL User Profiles and Messages. Jobs will remain safe. Continue?")) return;
+      setIsResetting(true);
+      await resetUserSessionData();
+      alert("User Data Reset Complete. Reloading...");
+      window.location.reload();
   };
 
   return (
@@ -147,7 +211,6 @@ export const ChatInterface = () => {
            style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")' }}>
       </div>
 
-      {/* Header */}
       <div className="bg-[#008069] p-3 flex items-center justify-between text-white shadow-md z-10">
         <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-lg font-bold">
@@ -156,7 +219,7 @@ export const ChatInterface = () => {
             <div>
                 <h2 className="font-medium text-sm md:text-base">Job Assistant AI</h2>
                 <p className="text-xs text-green-100/80">
-                    {isTyping ? 'typing...' : (apiKey ? 'AI Active 🟢' : 'Basic Mode 🟡')}
+                    {isTyping ? 'typing...' : (connectionError ? 'Offline 🔴' : 'AI Active 🟢')}
                 </p>
             </div>
         </div>
@@ -166,29 +229,26 @@ export const ChatInterface = () => {
         </div>
       </div>
 
-      {/* Settings Modal */}
       {showSettings && (
         <div className="absolute top-16 right-4 z-50 bg-white p-4 rounded-lg shadow-xl border border-gray-200 w-72 animate-in fade-in zoom-in-95 duration-200">
-            <h3 className="font-bold text-gray-800 mb-2">Demo Controls</h3>
+            <h3 className="font-bold text-gray-800 mb-2">Settings</h3>
             
-            <div className="mb-4">
-                <label className="text-xs text-gray-500 block mb-1">OpenAI API Key</label>
-                <input 
-                    type="password" 
-                    placeholder="sk-..." 
-                    className="w-full p-2 border rounded text-sm bg-gray-50"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                />
-            </div>
-
             <button 
                 onClick={handleReset}
                 disabled={isResetting}
-                className="w-full bg-red-50 text-red-600 border border-red-200 py-2 rounded text-sm flex items-center justify-center gap-2 hover:bg-red-100 mb-2 disabled:opacity-50"
+                className="w-full bg-blue-50 text-blue-600 border border-blue-200 py-2 rounded text-sm flex items-center justify-center gap-2 hover:bg-blue-100 mb-2 disabled:opacity-50"
             >
                 {isResetting ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                {isResetting ? "Resetting..." : "Start Fresh Session"}
+                New User Session
+            </button>
+            
+            <button 
+                onClick={handleFullDatabaseReset}
+                disabled={isResetting}
+                className="w-full bg-red-50 text-red-600 border border-red-200 py-2 rounded text-sm flex items-center justify-center gap-2 hover:bg-red-100 mb-2 disabled:opacity-50"
+            >
+                <Trash2 size={14} />
+                Hard Reset Database (Users)
             </button>
 
             <button 
@@ -200,7 +260,6 @@ export const ChatInterface = () => {
         </div>
       )}
 
-      {/* Chat Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 relative z-0">
         {isLoadingHistory && (
             <div className="flex justify-center py-4">
@@ -212,8 +271,8 @@ export const ChatInterface = () => {
           <div
             key={msg.id}
             className={cn(
-              "flex w-full",
-              msg.sender === 'user' ? "justify-end" : "justify-start"
+              "flex w-full flex-col",
+              msg.sender === 'user' ? "items-end" : "items-start"
             )}
           >
             <div
@@ -221,16 +280,39 @@ export const ChatInterface = () => {
                 "max-w-[85%] md:max-w-[60%] rounded-lg p-2 shadow-sm relative text-sm",
                 msg.sender === 'user' 
                     ? "bg-[#d9fdd3] rounded-tr-none" 
-                    : "bg-white rounded-tl-none"
+                    : "bg-white rounded-tl-none",
+                msg.id === 'error' && "bg-red-50 text-red-600 border border-red-100"
               )}
             >
               {msg.type === 'text' && <p className="text-gray-800 whitespace-pre-wrap px-1">{msg.content}</p>}
-              {msg.type === 'job-card' && msg.jobData && <JobCard job={msg.jobData} />}
+              
+              {msg.type === 'job-card' && msg.jobData && (
+                  <JobCard 
+                    job={msg.jobData} 
+                    isApplied={appliedJobIds.has(msg.jobData.id)}
+                    onApply={() => handleJobApply(msg.jobData!.id)}
+                  />
+              )}
               
               <span className="text-[10px] text-gray-500 block text-right mt-1 opacity-70">
                 {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </span>
             </div>
+
+            {/* Render Option Buttons if present */}
+            {msg.options && (
+                <div className="flex gap-2 mt-2">
+                    {msg.options.map(opt => (
+                        <button 
+                            key={opt}
+                            onClick={() => handleSend(opt)}
+                            className="bg-white text-[#008069] border border-[#008069] px-4 py-1.5 rounded-full text-sm font-medium shadow-sm hover:bg-[#e6f2f0] transition-colors"
+                        >
+                            {opt}
+                        </button>
+                    ))}
+                </div>
+            )}
           </div>
         ))}
         
@@ -248,11 +330,9 @@ export const ChatInterface = () => {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
       <div className="bg-[#f0f2f5] p-3 flex items-center gap-2 z-10">
         <Smile size={24} className="text-gray-500 cursor-pointer hover:text-gray-600" />
         <Paperclip size={24} className="text-gray-500 cursor-pointer hover:text-gray-600" />
-        
         <div className="flex-1 bg-white rounded-lg flex items-center px-4 py-2 shadow-sm">
             <input
                 type="text"
@@ -263,7 +343,6 @@ export const ChatInterface = () => {
                 className="flex-1 outline-none text-sm text-gray-700"
             />
         </div>
-
         {input.trim() ? (
              <button 
                 onClick={() => handleSend()}

@@ -1,9 +1,9 @@
 import OpenAI from 'openai';
 
-// Initialize OpenAI Client
-// We allow passing the key dynamically from the UI for testing purposes
+// Initialize OpenAI Client (Configured for OpenRouter/Gemini)
 export const getOpenAIClient = (apiKey?: string) => {
-  const key = apiKey || import.meta.env.VITE_OPENAI_API_KEY;
+  // Always prefer the env var for the permanent setup
+  const key = import.meta.env.VITE_OPENAI_API_KEY || apiKey;
   
   if (!key) {
     return null;
@@ -11,33 +11,33 @@ export const getOpenAIClient = (apiKey?: string) => {
 
   return new OpenAI({
     apiKey: key,
-    dangerouslyAllowBrowser: true // Allowed for this client-side demo
+    baseURL: "https://openrouter.ai/api/v1", // Point to OpenRouter
+    dangerouslyAllowBrowser: true,
+    defaultHeaders: {
+      "HTTP-Referer": window.location.origin, // Required by OpenRouter
+      "X-Title": "Job Assistant AI"
+    }
   });
 };
 
-// Helper to generate random embeddings when API quota is exceeded
-// This ensures the demo continues working even without a paid OpenAI account
+// Helper to generate random embeddings when API quota is exceeded or model not supported
 export const getMockEmbedding = () => {
-  // OpenAI text-embedding-3-small returns 1536 dimensions
   return Array.from({ length: 1536 }, () => Math.random() - 0.5);
 };
 
-// Generate Embedding for Text (using text-embedding-3-small)
+// Generate Embedding
+// Note: For OpenRouter, we try to use a compatible embedding model or fallback
 export const generateEmbedding = async (text: string, client: OpenAI) => {
   try {
     const response = await client.embeddings.create({
-      model: "text-embedding-3-small",
+      model: "text-embedding-3-small", // OpenRouter will try to route this or you can use a specific one
       input: text,
       encoding_format: "float",
     });
     return response.data[0].embedding;
   } catch (error: any) {
-    // Handle Quota Exceeded (429) by returning a mock embedding
-    if (error?.status === 429 || error?.code === 'insufficient_quota') {
-      console.warn("OpenAI Quota Exceeded. Using mock embedding for demo.");
-      return getMockEmbedding();
-    }
-    console.error("Error generating embedding:", error);
-    throw error;
+    // If embedding fails (common with some OpenRouter models), use mock
+    console.warn("Embedding generation failed (using mock):", error);
+    return getMockEmbedding();
   }
 };

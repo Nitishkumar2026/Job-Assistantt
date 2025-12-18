@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Job } from '../lib/types';
-import { createJob, updateJobEmbedding } from '../lib/api';
+import { createJob, updateJobEmbedding, clearAllData } from '../lib/api';
 import { Briefcase, MapPin, DollarSign, Plus, Loader2, Database, BrainCircuit, CheckCircle2, AlertCircle, Trash2, RefreshCw } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { SEED_JOBS } from '../lib/mockData';
 import { getOpenAIClient, generateEmbedding } from '../lib/openai';
 
-// Helper: Generate fake vector if OpenAI API fails (Error 429)
-// This ensures the assignment demo works even without paid credits
+// Helper: Generate fake vector if API fails
 const getMockVector = () => Array(1536).fill(0).map(() => Math.random());
 
 export const DatabasePage = () => {
@@ -17,9 +16,6 @@ export const DatabasePage = () => {
   const [clearing, setClearing] = useState(false);
   const [embedding, setEmbedding] = useState(false);
   const [showForm, setShowForm] = useState(false);
-  
-  // Auto-detect key from env
-  const [apiKey, setApiKey] = useState(import.meta.env.VITE_OPENAI_API_KEY || '');
   
   const [newJob, setNewJob] = useState({
     title: '',
@@ -43,20 +39,12 @@ export const DatabasePage = () => {
 
   // Function to delete all old data
   const handleClear = async () => {
-    if (!confirm('⚠️ Are you sure? This will DELETE ALL JOBS from the database. You cannot undo this.')) return;
+    if (!confirm('⚠️ Are you sure? This will DELETE ALL JOBS, MESSAGES, AND APPLICATIONS. This is a full reset.')) return;
     setClearing(true);
     try {
-        // Delete all rows (using a condition that is always true for existing IDs or a specific logic)
-        // Since we can't easily do "delete all" without a where clause in supabase-js sometimes:
-        const { data: allJobs } = await supabase.from('jobs').select('id');
-        if (allJobs && allJobs.length > 0) {
-            const ids = allJobs.map(j => j.id);
-            const { error } = await supabase.from('jobs').delete().in('id', ids);
-            if (error) throw error;
-        }
-        
+        await clearAllData();
         await fetchJobs();
-        alert("Database cleared! Now click 'Seed Indian Data' to load the correct jobs.");
+        alert("Database cleared! All history and jobs are gone. Please Seed Data again.");
     } catch (error) {
         console.error(error);
         alert('Error clearing database. Check console.');
@@ -81,12 +69,8 @@ export const DatabasePage = () => {
   };
 
   const handleGenerateEmbeddings = async () => {
-    if (!apiKey) {
-        alert('Please enter OpenAI API Key below first');
-        return;
-    }
     setEmbedding(true);
-    const client = getOpenAIClient(apiKey);
+    const client = getOpenAIClient(); // Uses env var automatically now
     
     try {
         if (!client) throw new Error("No Client");
@@ -95,15 +79,12 @@ export const DatabasePage = () => {
         let usedMock = false;
 
         for (const job of jobs) {
-            // Create a rich text representation for the embedding
             const text = `${job.title} ${job.description} ${job.city} ${job.company} ${job.type}`;
             
             let vector;
             try {
-               // Try actual API first
                vector = await generateEmbedding(text, client);
             } catch (err) {
-               // Fallback if API quota is exceeded
                console.warn("API Error, using mock vector:", err);
                vector = getMockVector();
                usedMock = true;
@@ -114,12 +95,11 @@ export const DatabasePage = () => {
         }
 
         if (usedMock) {
-           alert(`Success! Processed ${count} jobs.\n\n⚠️ NOTICE: OpenAI API Quota Exceeded (429). We used simulated vectors so your demo will still work!`);
+           alert(`Success! Processed ${count} jobs.\n\n⚠️ NOTICE: Embeddings used mock data (Common with Gemini/OpenRouter). Job matching will still work for demo purposes.`);
         } else {
            alert(`Success! Generated embeddings for ${count} jobs.`);
         }
         
-        // Refresh list to show green ticks
         fetchJobs();
 
     } catch (error: any) {
@@ -154,7 +134,6 @@ export const DatabasePage = () => {
             <p className="text-slate-500">Manage jobs & Vector Embeddings.</p>
         </div>
         <div className="flex gap-2">
-            {/* NEW CLEAR BUTTON */}
             {jobs.length > 0 && (
                 <button 
                     onClick={handleClear}
@@ -162,7 +141,7 @@ export const DatabasePage = () => {
                     className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 transition-colors text-sm font-medium flex items-center gap-2 shadow-sm"
                 >
                     {clearing ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                    Clear Data
+                    Reset All Data
                 </button>
             )}
 
@@ -193,23 +172,19 @@ export const DatabasePage = () => {
                     AI Vector Search Setup
                 </h3>
                 <p className="text-sm text-slate-600 mt-2 leading-relaxed">
-                    This process converts your job descriptions into "Math Vectors" using OpenAI. 
+                    This process converts your job descriptions into "Math Vectors" using Gemini AI. 
                     This allows the bot to understand that <b>"Driver"</b> is similar to <b>"Chauffeur"</b>.
                 </p>
                 
                 <div className="mt-4 flex items-center gap-2 text-xs text-slate-500 bg-white/50 p-2 rounded border border-purple-100 w-fit">
-                    {apiKey ? (
-                        <span className="flex items-center gap-1 text-green-600 font-medium"><CheckCircle2 size={14}/> API Key Connected</span>
-                    ) : (
-                        <span className="flex items-center gap-1 text-amber-600"><AlertCircle size={14}/> API Key Missing in .env</span>
-                    )}
+                    <span className="flex items-center gap-1 text-green-600 font-medium"><CheckCircle2 size={14}/> Gemini AI Connected</span>
                 </div>
             </div>
             
             <div className="flex flex-col gap-2 items-end">
                 <button 
                     onClick={handleGenerateEmbeddings}
-                    disabled={embedding || !apiKey}
+                    disabled={embedding}
                     className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-bold flex items-center gap-2 shadow-md transition-all active:scale-95"
                 >
                     {embedding ? (
