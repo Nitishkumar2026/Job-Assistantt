@@ -7,4 +7,4 @@
     3. Run `npm run dev` to start the development server.
     
 Live link
-https://job-assistantt.netlify.app/
+https://job-assistantt-final.netlify.app/
